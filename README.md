@@ -36,7 +36,3 @@ This project provides tools to align a SAM3D-derived skeleton (from pose estimat
     python src/comparison_sidebyside.py
     python src/visualize_superimposed.py
     ```
-
-## Archive
-
-Legacy scripts and debug outputs are moved to the `archive/` directory (not included in the main repository).
