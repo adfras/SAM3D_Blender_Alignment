@@ -10,21 +10,13 @@ This project provides tools to align a SAM3D-derived skeleton (from pose estimat
 
 ## Project Structure
 
-- **`skeleton_core.py`**: The core library containing all alignment logic, including data loading, parsing, and the reconstruction algorithm.
-- **`run_alignment.py`**: The main script to execute the alignment pipeline. It generates:
-    - `aligned_skeleton_data.json`: The final aligned skeleton data.
-    - `debug_joint_positions.csv`: Joint positions for verification.
-    - `debug_bone_vectors.csv`: Bone vector metrics for verification.
-- **`comparison_sidebyside.py`**: Visualizes the Blender (Green) and SAM3D (Red) skeletons side-by-side.
-- **`visualize_superimposed.py`**: Visualizes the skeletons superimposed to demonstrate the perfect match.
-- **`verify_data_sources.py`**: Verifies that the input data sources are distinct (proving the alignment is a reconstruction, not a copy).
-
-## Data Files
-
-- `sam3d_data.json`: Input pose estimation data.
-- `blender_rest_pose.json`: Reference rest pose from Blender.
-- `mhr_hierarchy.json`: Bone hierarchy definition.
-- `qYwLO.png`: Reference image.
+- **`src/`**: Python source code.
+    - **`skeleton_core.py`**: The core library containing all alignment logic.
+    - **`run_alignment.py`**: The main script to execute the alignment pipeline.
+    - **`comparison_sidebyside.py`**: Visualizes the skeletons side-by-side.
+    - **`visualize_superimposed.py`**: Visualizes the skeletons superimposed.
+- **`data/`**: Input data files (JSONs, images).
+- **`docs/`**: Documentation and walkthroughs.
 
 ## How to Run
 
@@ -35,13 +27,14 @@ This project provides tools to align a SAM3D-derived skeleton (from pose estimat
 
 2.  **Run Alignment**:
     ```bash
-    python run_alignment.py
+    python src/run_alignment.py
     ```
+    Outputs will be generated in the current directory.
 
 3.  **Visualize Results**:
     ```bash
-    python comparison_sidebyside.py
-    python visualize_superimposed.py
+    python src/comparison_sidebyside.py
+    python src/visualize_superimposed.py
     ```
 
 ## Archive

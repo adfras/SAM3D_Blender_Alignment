@@ -3,3 +3,5 @@ __pycache__/
 .venv/
 .DS_Store
 *.log
+sam-3d-body/
+documentation/

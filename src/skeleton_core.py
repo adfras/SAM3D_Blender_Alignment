@@ -1,10 +1,15 @@
 import json
 import numpy as np
 
+import os
+
 # --- Configuration ---
-MOTION_DATA_FILE = "sam3d_data.json"
-BLENDER_REST_FILE = "blender_rest_pose.json"
-HIERARCHY_FILE = "mhr_hierarchy.json"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "..", "data")
+
+MOTION_DATA_FILE = os.path.join(DATA_DIR, "sam3d_data.json")
+BLENDER_REST_FILE = os.path.join(DATA_DIR, "blender_rest_pose.json")
+HIERARCHY_FILE = os.path.join(DATA_DIR, "mhr_hierarchy.json")
 
 
 def load_data():
