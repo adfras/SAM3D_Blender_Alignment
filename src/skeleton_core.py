@@ -7,7 +7,7 @@ import os
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "..", "data")
 
-MOTION_DATA_FILE = os.path.join(DATA_DIR, "sam3d_data.json")
+MOTION_DATA_FILE = os.path.join(DATA_DIR, "video_motion_full.json")
 BLENDER_REST_FILE = os.path.join(DATA_DIR, "blender_rest_pose.json")
 HIERARCHY_FILE = os.path.join(DATA_DIR, "mhr_hierarchy.json")
 
@@ -209,8 +209,8 @@ def compute_blender_height(joints_info):
 
 
 def to_plot_coords(vec):
-    """Convert Blender-space vector (X, Y, Z) to plot coords (X, depth Y, up Z)."""
-    return np.array([vec[0], -vec[2], vec[1]])
+    """Convert Blender-space vector (X, Y, Z) to plot coords (X, Y, Z). Keep Z-up."""
+    return np.array([vec[0], vec[1], vec[2]])
 
 
 def get_joint_point(blender_joint, name):

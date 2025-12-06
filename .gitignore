@@ -5,3 +5,24 @@ __pycache__/
 *.log
 sam-3d-body/
 documentation/
+
+# Large binary/media files
+*.mp4
+*.fbx
+*.blend
+*.blend1
+
+# Generated outputs
+*.gif
+*.png
+
+# Generated data (keep reference data)
+data/animation_data.json
+data/idle_motion.json
+data/video_motion.json
+data/video_motion_full.json
+
+# IDE and tool configs
+.claude/
+*.code-workspace
+nul
