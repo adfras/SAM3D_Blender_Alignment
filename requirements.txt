@@ -35,3 +35,7 @@ tensorboard
 huggingface_hub
 numpy
 matplotlib
+scipy
+
+# Phase 2: Skeleton Animation
+# (Blender has its own Python with mathutils built-in)

@@ -1,0 +1,346 @@
+"""
+Complete Pipeline - STRETCH TO CHILD
+=====================================
+
+Each bone has:
+1. COPY_LOCATION to position its HEAD at the joint empty
+2. STRETCH_TO to point its TAIL toward its child's empty
+
+Usage in Blender:
+    1. Open script in Scripting tab
+    2. Press Alt+P to run
+    3. Press Spacebar to play animation
+"""
+
+import bpy
+import json
+import os
+from mathutils import Matrix, Vector
+
+# --- Configuration ---
+try:
+    script_path = bpy.context.space_data.text.filepath if bpy.context.space_data and bpy.context.space_data.text else None
+    if script_path:
+        BASE_PATH = os.path.dirname(os.path.dirname(os.path.abspath(script_path)))
+    else:
+        BASE_PATH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+except:
+    BASE_PATH = r"D:\MediaPipeSAM3D\skeleton_alignment_work\SAM3D2Blender"
+
+HIERARCHY_PATH = os.path.join(BASE_PATH, "data", "mhr_hierarchy.json")
+MOTION_PATH_SMOOTH = os.path.join(BASE_PATH, "data", "video_motion_armature_smooth.json")
+MOTION_PATH_RAW = os.path.join(BASE_PATH, "data", "video_motion_armature.json")
+MOTION_PATH = MOTION_PATH_SMOOTH if os.path.exists(MOTION_PATH_SMOOTH) else MOTION_PATH_RAW
+
+COORD_TRANSFORM = Matrix([[1,0,0], [0,0,-1], [0,-1,0]])
+
+BONE_NAME_MAP = {
+    "root": "pelvis", "c_spine0": "spine_01", "c_spine1": "spine_02",
+    "c_spine2": "spine_03", "c_spine3": "spine_05", "c_neck": "neck_01", "c_head": "head",
+    "l_clavicle": "clavicle_l", "l_uparm": "upperarm_l", "l_lowarm": "lowerarm_l", "l_wrist": "hand_l",
+    "r_clavicle": "clavicle_r", "r_uparm": "upperarm_r", "r_lowarm": "lowerarm_r", "r_wrist": "hand_r",
+    "l_upleg": "thigh_l", "l_lowleg": "calf_l", "l_foot": "foot_l", "l_ball": "ball_l",
+    "r_upleg": "thigh_r", "r_lowleg": "calf_r", "r_foot": "foot_r", "r_ball": "ball_r",
+    # Left fingers
+    "l_thumb0": "thumb_01_l", "l_thumb1": "thumb_02_l", "l_thumb2": "thumb_03_l", "l_thumb3": "thumb_04_l",
+    "l_index1": "index_01_l", "l_index2": "index_02_l", "l_index3": "index_03_l",
+    "l_middle1": "middle_01_l", "l_middle2": "middle_02_l", "l_middle3": "middle_03_l",
+    "l_ring1": "ring_01_l", "l_ring2": "ring_02_l", "l_ring3": "ring_03_l",
+    "l_pinky0": "pinky_01_l", "l_pinky1": "pinky_02_l", "l_pinky2": "pinky_03_l", "l_pinky3": "pinky_04_l",
+    # Right fingers
+    "r_thumb0": "thumb_01_r", "r_thumb1": "thumb_02_r", "r_thumb2": "thumb_03_r", "r_thumb3": "thumb_04_r",
+    "r_index1": "index_01_r", "r_index2": "index_02_r", "r_index3": "index_03_r",
+    "r_middle1": "middle_01_r", "r_middle2": "middle_02_r", "r_middle3": "middle_03_r",
+    "r_ring1": "ring_01_r", "r_ring2": "ring_02_r", "r_ring3": "ring_03_r",
+    "r_pinky0": "pinky_01_r", "r_pinky1": "pinky_02_r", "r_pinky2": "pinky_03_r", "r_pinky3": "pinky_04_r",
+}
+
+MAIN_BONES = [
+    # Spine
+    ("pelvis", "spine_01"), ("spine_01", "spine_02"), ("spine_02", "spine_03"),
+    ("spine_03", "spine_05"), ("spine_05", "neck_01"), ("neck_01", "head"),
+    # Legs
+    ("pelvis", "thigh_l"), ("thigh_l", "calf_l"), ("calf_l", "foot_l"), ("foot_l", "ball_l"),
+    ("pelvis", "thigh_r"), ("thigh_r", "calf_r"), ("calf_r", "foot_r"), ("foot_r", "ball_r"),
+    # Arms
+    ("spine_05", "clavicle_l"), ("clavicle_l", "upperarm_l"), ("upperarm_l", "lowerarm_l"), ("lowerarm_l", "hand_l"),
+    ("spine_05", "clavicle_r"), ("clavicle_r", "upperarm_r"), ("upperarm_r", "lowerarm_r"), ("lowerarm_r", "hand_r"),
+    # Left fingers
+    ("hand_l", "thumb_01_l"), ("thumb_01_l", "thumb_02_l"), ("thumb_02_l", "thumb_03_l"), ("thumb_03_l", "thumb_04_l"),
+    ("hand_l", "index_01_l"), ("index_01_l", "index_02_l"), ("index_02_l", "index_03_l"),
+    ("hand_l", "middle_01_l"), ("middle_01_l", "middle_02_l"), ("middle_02_l", "middle_03_l"),
+    ("hand_l", "ring_01_l"), ("ring_01_l", "ring_02_l"), ("ring_02_l", "ring_03_l"),
+    ("hand_l", "pinky_01_l"), ("pinky_01_l", "pinky_02_l"), ("pinky_02_l", "pinky_03_l"), ("pinky_03_l", "pinky_04_l"),
+    # Right fingers
+    ("hand_r", "thumb_01_r"), ("thumb_01_r", "thumb_02_r"), ("thumb_02_r", "thumb_03_r"), ("thumb_03_r", "thumb_04_r"),
+    ("hand_r", "index_01_r"), ("index_01_r", "index_02_r"), ("index_02_r", "index_03_r"),
+    ("hand_r", "middle_01_r"), ("middle_01_r", "middle_02_r"), ("middle_02_r", "middle_03_r"),
+    ("hand_r", "ring_01_r"), ("ring_01_r", "ring_02_r"), ("ring_02_r", "ring_03_r"),
+    ("hand_r", "pinky_01_r"), ("pinky_01_r", "pinky_02_r"), ("pinky_02_r", "pinky_03_r"), ("pinky_03_r", "pinky_04_r"),
+]
+
+MH_TO_SAM3D = {v: k for k, v in BONE_NAME_MAP.items()}
+
+
+def transform_point(point):
+    return COORD_TRANSFORM @ Vector(point)
+
+
+def cleanup():
+    for obj in list(bpy.data.objects):
+        bpy.data.objects.remove(obj, do_unlink=True)
+    for arm in list(bpy.data.armatures):
+        bpy.data.armatures.remove(arm)
+
+
+def get_used_joints():
+    used = set()
+    for p, c in MAIN_BONES:
+        used.add(p)
+        used.add(c)
+    return used
+
+
+def create_empties(joint_names, rest_positions):
+    joint_index = {n: i for i, n in enumerate(joint_names)}
+    used_joints = get_used_joints()
+    
+    emp_coll = bpy.data.collections.new("Empties")
+    bpy.context.scene.collection.children.link(emp_coll)
+    
+    # Ensure empties collection is visible (required for constraints to work)
+    emp_coll.hide_viewport = False
+    emp_coll.hide_render = False
+    
+    empties = {}
+    missing_joints = []
+    
+    for mh_name in used_joints:
+        sam_name = MH_TO_SAM3D.get(mh_name)
+        if not sam_name:
+            missing_joints.append((mh_name, "no SAM3D mapping"))
+            continue
+        if sam_name not in joint_index:
+            missing_joints.append((mh_name, sam_name + " not in joint_index"))
+            continue
+        idx = joint_index[sam_name]
+        if idx >= len(rest_positions):
+            missing_joints.append((mh_name, "idx " + str(idx) + " >= " + str(len(rest_positions))))
+            continue
+        
+        pos = transform_point(rest_positions[idx])
+        empty = bpy.data.objects.new("J_" + mh_name, None)
+        empty.empty_display_type = 'SPHERE'
+        empty.empty_display_size = 0.015
+        empty.location = pos
+        empty.hide_viewport = False  # Ensure visible
+        emp_coll.objects.link(empty)
+        empties[mh_name] = empty
+    
+    
+    print("Created " + str(len(empties)) + " empties (expected: " + str(len(used_joints)) + ")")
+    
+    # Debug: list all created empties
+    print("Created empties:")
+    for name in sorted(empties.keys()):
+        print("  - " + name)
+    
+    if missing_joints:
+        print("WARNING: Missing empties for:")
+        for name, reason in missing_joints:
+            print("  - " + name + ": " + reason)
+    
+    return empties, joint_index
+
+
+def animate_empties(empties, frames_data, joint_names, joint_index):
+    num_frames = len(frames_data)
+    print("Animating " + str(num_frames) + " frames...")
+    
+    used_joints = get_used_joints()
+    
+    for frame_idx, frame_data in enumerate(frames_data):
+        joints = frame_data.get('joints_mhr', frame_data.get('joints3d', []))
+        if len(joints) == 127:
+            joints = joints[1:]
+        
+        for mh_name in used_joints:
+            if mh_name not in empties:
+                continue
+            sam_name = MH_TO_SAM3D.get(mh_name)
+            if not sam_name or sam_name not in joint_index:
+                continue
+            idx = joint_index[sam_name]
+            if idx >= len(joints):
+                continue
+            
+            pos = transform_point(joints[idx])
+            empty = empties[mh_name]
+            empty.location = pos
+            empty.keyframe_insert(data_path="location", frame=frame_idx)
+        
+        if frame_idx % 200 == 0:
+            print("  Frame " + str(frame_idx) + "/" + str(num_frames))
+    
+    return num_frames
+
+
+def create_armature_with_stretch(empties, joint_names, rest_positions, name="MetaHuman_Rig"):
+    joint_index = {n: i for i, n in enumerate(joint_names)}
+    used_joints = get_used_joints()
+    
+    arm_data = bpy.data.armatures.new(name + "_Armature")
+    arm_obj = bpy.data.objects.new(name, arm_data)
+    bpy.context.collection.objects.link(arm_obj)
+    
+    bpy.context.view_layer.objects.active = arm_obj
+    bpy.ops.object.mode_set(mode='EDIT')
+    
+    edit_bones = arm_data.edit_bones
+    bone_map = {}
+    
+    for parent_name, child_name in MAIN_BONES:
+        sam_parent = MH_TO_SAM3D.get(parent_name)
+        sam_child = MH_TO_SAM3D.get(child_name)
+        
+        if not sam_parent or not sam_child:
+            continue
+        if sam_parent not in joint_index or sam_child not in joint_index:
+            continue
+            
+        p_idx = joint_index[sam_parent]
+        c_idx = joint_index[sam_child]
+        
+        if p_idx >= len(rest_positions) or c_idx >= len(rest_positions):
+            continue
+        
+        bone_name = parent_name + "_to_" + child_name
+        bone = edit_bones.new(bone_name)
+        bone_map[(parent_name, child_name)] = bone_name  # Store name string, not EditBone object!
+        
+        head = transform_point(rest_positions[p_idx])
+        tail = transform_point(rest_positions[c_idx])
+        
+        bone.head = head
+        bone.tail = tail
+        
+        if (bone.tail - bone.head).length < 0.001:
+            bone.tail = bone.head + Vector((0, 0, 0.02))
+    
+    bpy.ops.object.mode_set(mode='OBJECT')
+    
+    bpy.context.view_layer.objects.active = arm_obj
+    bpy.ops.object.mode_set(mode='POSE')
+    
+    constrained_bones = 0
+    missing_parent_empties = []
+    missing_child_empties = []
+    
+    for (parent_name, child_name), bone_name in bone_map.items():
+        pose_bone = arm_obj.pose.bones.get(bone_name)
+        if not pose_bone:
+            continue
+        
+        has_copy_loc = False
+        has_stretch = False
+        
+        if parent_name in empties:
+            cl = pose_bone.constraints.new('COPY_LOCATION')
+            cl.target = empties[parent_name]
+            cl.influence = 1.0  # Ensure full influence
+            has_copy_loc = True
+        else:
+            missing_parent_empties.append((bone_name, parent_name))
+        
+        if child_name in empties:
+            st = pose_bone.constraints.new('STRETCH_TO')
+            st.target = empties[child_name]
+            # Use pose bone for rest length (EditBone is no longer valid after mode switch)
+            st.rest_length = pose_bone.bone.length
+            st.volume = 'NO_VOLUME'
+            st.influence = 1.0  # Ensure full influence
+            has_stretch = True
+        else:
+            missing_child_empties.append((bone_name, child_name))
+        
+        if has_copy_loc and has_stretch:
+            constrained_bones += 1
+    
+    bpy.ops.object.mode_set(mode='OBJECT')
+    
+    # Force update to activate constraints
+    bpy.context.view_layer.update()
+    
+    print("Fully constrained bones: " + str(constrained_bones) + "/" + str(len(bone_map)))
+    if missing_parent_empties:
+        print("WARNING: Missing PARENT empties for " + str(len(missing_parent_empties)) + " bones:")
+        for bone_name, parent in missing_parent_empties:
+            print("  - " + bone_name + " needs " + parent)
+    if missing_child_empties:
+        print("WARNING: Missing CHILD empties for " + str(len(missing_child_empties)) + " bones:")
+        for bone_name, child in missing_child_empties:
+            print("  - " + bone_name + " needs " + child)
+    
+    arm_obj.data.display_type = 'OCTAHEDRAL'  # Better for seeing constraint status
+    arm_obj.show_in_front = True
+    
+    print("Created armature with " + str(len(bone_map)) + " bones")
+    return arm_obj
+
+
+def main():
+    print("")
+    print("=" * 60)
+    print("METAHUMAN PIPELINE - STRETCH TO CHILD")
+    print("=" * 60)
+    
+    cleanup()
+    
+    print("")
+    print("Loading data...")
+    print("Motion file: " + MOTION_PATH)
+    with open(HIERARCHY_PATH, 'r') as f:
+        hierarchy = json.load(f)
+    with open(MOTION_PATH, 'r') as f:
+        motion = json.load(f)
+    
+    joint_names = hierarchy['joints']
+    frames_data = motion.get('frames', [motion])
+    
+    if len(joint_names) == 127 and joint_names[0] in ['body_world', 'Body_World']:
+        joint_names = joint_names[1:]
+    
+    rest_joints = frames_data[0].get('joints_mhr', frames_data[0].get('joints3d', []))
+    if len(rest_joints) == 127:
+        rest_joints = rest_joints[1:]
+    
+    print("Joints: " + str(len(joint_names)) + ", Frames: " + str(len(frames_data)))
+    
+    print("")
+    print("[1/3] Creating empties...")
+    empties, joint_index = create_empties(joint_names, rest_joints)
+    
+    print("")
+    print("[2/3] Animating empties...")
+    num_frames = animate_empties(empties, frames_data, joint_names, joint_index)
+    
+    print("")
+    print("[3/3] Creating armature with STRETCH_TO...")
+    arm_obj = create_armature_with_stretch(empties, joint_names, rest_joints)
+    
+    bpy.context.scene.frame_start = 0
+    bpy.context.scene.frame_end = num_frames - 1
+    bpy.context.scene.frame_set(0)
+    
+    bpy.ops.object.select_all(action='DESELECT')
+    arm_obj.select_set(True)
+    bpy.context.view_layer.objects.active = arm_obj
+    
+    print("")
+    print("=" * 60)
+    print("DONE! Press SPACEBAR to play animation.")
+    print("=" * 60)
+
+
+if __name__ == "__main__":
+    main()
