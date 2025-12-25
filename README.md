@@ -50,21 +50,22 @@ This project evolved through two phases:
 ### Pipeline
 
 ```
-Video → SAM3D → JSON → Blender → Animated Skeleton
+Video -> SAM3D -> JSON -> Blender (Preview or Export) -> FBX -> UE5 Retarget
 ```
 
 ### Usage
 
 ```bash
 # 1. Extract motion from video
-python phase2_animation/src/run_sam3d_inference.py --image video.mp4 --output phase2_animation/data/video_motion.json
+python phase2_animation/src/run_sam3d_inference.py --image video.mp4 --output phase2_animation/data/video_motion_armature.json
 
 # 2. (Optional) Smooth the data
 python phase2_animation/src/smooth_motion_data.py
 
 # 3. Open Blender and run the script
-# In Blender: Text → Open → phase2_animation/src/complete_pipeline_metahuman.py
-# Press Alt+P to run, Spacebar to play
+# In Blender: Text -> Open -> phase2_animation/src/complete_pipeline_metahuman.py (preview)
+# Or: Text -> Open -> phase2_animation/src/metahuman_standard_export.py (UE5 export)
+# Press Alt+P to run, Spacebar to play (preview script)
 ```
 
 ## Project Structure
@@ -86,6 +87,7 @@ SAM3D_Blender_Alignment/
 │   │   ├── run_sam3d_inference.py
 │   │   ├── smooth_motion_data.py
 │   │   ├── complete_pipeline_metahuman.py
+│   │   ├── metahuman_standard_export.py
 │   │   └── extract_mhr_hierarchy.py
 │   ├── data/
 │   │   └── mhr_hierarchy.json
@@ -103,6 +105,8 @@ SAM3D_Blender_Alignment/
 - **Phase 2**: [phase2_animation/README.md](phase2_animation/README.md)
 - **Phase 2 Technical Details**: [phase2_animation/PIPELINE_DOCUMENTATION.md](phase2_animation/PIPELINE_DOCUMENTATION.md)
 - **Project Docs**: [docs/](docs/)
+- **Fix Walkthrough**: [docs/fix_arm_orientation_walkthrough.md](docs/fix_arm_orientation_walkthrough.md)
+- **Proposed Changes**: [docs/proposed_changes.md](docs/proposed_changes.md)
 
 ## Requirements
 
@@ -114,7 +118,6 @@ pip install -r requirements.txt
 
 ## Future Work
 
-- [ ] FBX export for Unreal Engine import
 - [ ] IK Retargeter integration for MetaHuman
 - [ ] Batch video processing
 - [ ] Real-time preview overlay

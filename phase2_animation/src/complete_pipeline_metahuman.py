@@ -31,6 +31,7 @@ HIERARCHY_PATH = os.path.join(BASE_PATH, "data", "mhr_hierarchy.json")
 MOTION_PATH_SMOOTH = os.path.join(BASE_PATH, "data", "video_motion_armature_smooth.json")
 MOTION_PATH_RAW = os.path.join(BASE_PATH, "data", "video_motion_armature.json")
 MOTION_PATH = MOTION_PATH_SMOOTH if os.path.exists(MOTION_PATH_SMOOTH) else MOTION_PATH_RAW
+FBX_OUTPUT_PATH = os.path.join(BASE_PATH, "data", "metahuman_animation.fbx")
 
 COORD_TRANSFORM = Matrix([[1,0,0], [0,0,-1], [0,-1,0]])
 
@@ -288,6 +289,71 @@ def create_armature_with_stretch(empties, joint_names, rest_positions, name="Met
     return arm_obj
 
 
+def bake_animation(arm_obj, num_frames):
+    """
+    Bake constraint-driven animation to keyframes.
+    
+    This converts the live constraint evaluation (COPY_LOCATION + STRETCH_TO)
+    into actual keyframes on each bone, which is required for FBX export.
+    """
+    print("Baking " + str(num_frames) + " frames (this may take a minute)...")
+    
+    # Ensure armature is selected and active
+    bpy.ops.object.select_all(action='DESELECT')
+    arm_obj.select_set(True)
+    bpy.context.view_layer.objects.active = arm_obj
+    
+    # Enter Pose mode
+    bpy.ops.object.mode_set(mode='POSE')
+    
+    # Select all pose bones
+    bpy.ops.pose.select_all(action='SELECT')
+    
+    # Bake the animation with visual keying (captures constraint results)
+    bpy.ops.nla.bake(
+        frame_start=0,
+        frame_end=num_frames - 1,
+        only_selected=True,
+        visual_keying=True,       # Captures constraint results
+        clear_constraints=True,   # Remove constraints after baking
+        bake_types={'POSE'}       # Bake pose bones
+    )
+    
+    # Return to Object mode
+    bpy.ops.object.mode_set(mode='OBJECT')
+    
+    print("Baking complete. Constraints removed, keyframes applied.")
+
+
+def export_fbx(arm_obj, output_path):
+    """
+    Export the armature with baked animation to FBX format.
+    
+    Uses UE5-compatible settings for proper import.
+    """
+    # Ensure only armature is selected
+    bpy.ops.object.select_all(action='DESELECT')
+    arm_obj.select_set(True)
+    bpy.context.view_layer.objects.active = arm_obj
+    
+    # Export with UE5-compatible settings
+    bpy.ops.export_scene.fbx(
+        filepath=output_path,
+        use_selection=True,
+        object_types={'ARMATURE'},
+        add_leaf_bones=False,
+        bake_anim=True,
+        bake_anim_use_all_bones=True,
+        bake_anim_use_nla_strips=False,
+        bake_anim_use_all_actions=False,
+        bake_anim_force_startend_keying=True,
+        axis_forward='-Y',
+        axis_up='Z'
+    )
+    
+    print("Exported FBX to: " + output_path)
+
+
 def main():
     print("")
     print("=" * 60)
@@ -325,20 +391,40 @@ def main():
     num_frames = animate_empties(empties, frames_data, joint_names, joint_index)
     
     print("")
-    print("[3/3] Creating armature with STRETCH_TO...")
+    print("[3/5] Creating armature with STRETCH_TO...")
     arm_obj = create_armature_with_stretch(empties, joint_names, rest_joints)
     
     bpy.context.scene.frame_start = 0
     bpy.context.scene.frame_end = num_frames - 1
     bpy.context.scene.frame_set(0)
     
+    print("")
+    print("[4/5] Baking animation to keyframes...")
+    bake_animation(arm_obj, num_frames)
+    
+    print("")
+    print("[5/5] Exporting FBX...")
+    export_fbx(arm_obj, FBX_OUTPUT_PATH)
+    
+    # Hide empties collection (no longer needed, but kept for reference)
+    if "Empties" in bpy.data.collections:
+        bpy.data.collections["Empties"].hide_viewport = True
+    
+    # Select armature for user
     bpy.ops.object.select_all(action='DESELECT')
     arm_obj.select_set(True)
     bpy.context.view_layer.objects.active = arm_obj
     
     print("")
     print("=" * 60)
-    print("DONE! Press SPACEBAR to play animation.")
+    print("DONE!")
+    print("")
+    print("FBX exported to: " + FBX_OUTPUT_PATH)
+    print("")
+    print("Next steps:")
+    print("1. Import FBX into UE5")
+    print("2. Create IK Rig for imported skeleton")
+    print("3. Use IK Retargeter to retarget to MetaHuman")
     print("=" * 60)
 
 

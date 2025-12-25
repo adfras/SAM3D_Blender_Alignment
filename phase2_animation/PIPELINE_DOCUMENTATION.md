@@ -7,7 +7,7 @@ This document provides a complete, reproducible guide for the SAM3D to Blender s
 ### Pipeline Summary
 
 ```
-Video → SAM3D Inference → Motion JSON → (Optional) Smoothing → Blender Script → Animated Skeleton
+Video -> SAM3D Inference -> Motion JSON -> (Optional) Smoothing -> Blender (Preview or Export) -> FBX -> UE5 Retarget
 ```
 
 ---
@@ -28,7 +28,7 @@ Video → SAM3D Inference → Motion JSON → (Optional) Smoothing → Blender S
 SAM3D must be installed in the parent directory:
 
 ```bash
-cd d:\MediaPipeSAM3D\skeleton_alignment_work
+cd /path/to/MediaPipeSAM3D/skeleton_alignment_work
 git clone https://github.com/facebookresearch/sam-3d-body.git
 cd sam-3d-body
 pip install -e .
@@ -46,7 +46,7 @@ huggingface-cli login  # Required for model weights
 Before processing any video, you must extract the MHR (MetaHuman Rig) skeleton hierarchy from SAM3D.
 
 ```bash
-cd d:\MediaPipeSAM3D\skeleton_alignment_work\SAM3D2Blender
+cd /path/to/SAM3D_Blender_Alignment/phase2_animation
 python src/extract_mhr_hierarchy.py
 ```
 
@@ -90,9 +90,9 @@ The script applies a Gaussian filter to smooth joint positions over time.
 
 > **Decision**: Smoothing is optional but recommended for most videos. The script automatically uses the smoothed version if it exists.
 
-### Step 4: Create Animated Skeleton in Blender
+### Step 4: Create Animated Skeleton in Blender (Preview)
 
-Open Blender and run the pipeline script:
+Open Blender and run the preview script:
 
 1. Open Blender
 2. Switch to the **Scripting** workspace
@@ -105,11 +105,36 @@ Open Blender and run the pipeline script:
 2. Keyframes empty positions for all frames
 3. Creates an armature with bones connecting joints
 4. Applies COPY_LOCATION and STRETCH_TO constraints to bones
+5. (Optional) Bakes and exports a quick FBX
 
 > **Decision**: We use live constraints (COPY_LOCATION + STRETCH_TO) rather than baking rotation keyframes because:
 > - Constraints provide real-time feedback during scrubbing
 > - Bones automatically stretch to follow joint positions
 > - Avoids complex rotation calculations that can introduce artifacts
+
+### Step 5: Export MetaHuman-Standard FBX from Blender
+
+For UE5 retargeting, use the MetaHuman-standard export script:
+
+1. Open Blender
+2. Switch to the **Scripting** workspace
+3. Open `src/metahuman_standard_export.py` via **Text → Open**
+4. Press **Alt+P** to run
+
+**Output**: `data/metahuman_standard.fbx`
+
+**What the script does:**
+1. Creates empties for MetaHuman-standard bone names
+2. Interpolates missing bones (spine_04, neck_02, metacarpals)
+3. Builds a MetaHuman-compatible hierarchy
+4. Bakes animation and exports FBX
+
+### Step 6: Unreal Engine 5 Retargeting
+
+1. Import the FBX as a skeletal mesh with animation
+2. Create an IK Rig for the imported skeleton
+3. Create an IK Retargeter (source: imported skeleton, target: MetaHuman)
+4. Retarget the animation to your MetaHuman character
 
 ---
 
@@ -120,7 +145,7 @@ Open Blender and run the pipeline script:
 SAM3D uses a different coordinate system than Blender:
 
 ```python
-COORD_TRANSFORM = Matrix([[1,0,0], [0,0,-1], [0,-1,0]])
+COORD_TRANSFORM = Matrix([[1,0,0], [0,0,1], [0,-1,0]])
 ```
 
 This matrix:
@@ -128,21 +153,21 @@ This matrix:
 - Swaps Y and Z axes
 - Negates the new Y axis
 
-> **Reason**: SAM3D uses Y-up with Z-forward, while Blender uses Z-up with Y-forward.
+> **Reason**: SAM3D uses Y-up with Z-forward, while Blender uses Z-up with Y-forward. The export script preserves forward direction for UE5 (see `../docs/fix_arm_orientation_walkthrough.md`).
 
 ### 2. Joint Name Mapping
 
 SAM3D uses internal joint names (e.g., `l_wrist`), while MetaHuman uses different conventions (e.g., `hand_l`):
 
 ```python
-BONE_NAME_MAP = {
+SAM3D_TO_MH = {
     "l_wrist": "hand_l",
     "l_thumb0": "thumb_01_l",
     # ... etc
 }
 ```
 
-> **Reason**: MetaHuman naming convention is required for eventual retargeting to Unreal Engine MetaHuman characters.
+> **Reason**: MetaHuman naming convention is required for UE5 retargeting. The export script also interpolates missing metacarpals (index/middle/ring) and adds spine_04 and neck_02 to match the MetaHuman hierarchy.
 
 ### 3. Bone Definition Using Parent-Child Pairs
 
@@ -190,6 +215,7 @@ if len(joint_names) == 127 and joint_names[0] == 'body_world':
 | `src/run_sam3d_inference.py` | Extract motion from video | Per video |
 | `src/smooth_motion_data.py` | Smooth motion data | Per video (optional) |
 | `src/complete_pipeline_metahuman.py` | Create animated skeleton in Blender | Per video |
+| `src/metahuman_standard_export.py` | Export MetaHuman-standard FBX | Per video (for UE5) |
 
 ### Data Files
 
@@ -198,6 +224,7 @@ if len(joint_names) == 127 and joint_names[0] == 'body_world':
 | `data/mhr_hierarchy.json` | Skeleton hierarchy (127 joints) |
 | `data/video_motion_armature.json` | Raw motion data from SAM3D |
 | `data/video_motion_armature_smooth.json` | Smoothed motion data |
+| `data/metahuman_standard.fbx` | MetaHuman-standard FBX export (generated) |
 
 ### Archived Files
 
@@ -226,6 +253,14 @@ Files in `src/archive/` and `data/archive/` are previous iterations or experimen
 
 **Solution**: Ensure joint names in `BONE_NAME_MAP` match exactly with `mhr_hierarchy.json`.
 
+### Arms or Shoulders Facing Backwards in UE5
+
+**Problem**: Arms or shoulders point behind the body after UE5 import.
+
+**Cause**: Incorrect axis conversion or forward direction.
+
+**Solution**: Use `src/metahuman_standard_export.py` and verify the corrected transform settings described in `../docs/fix_arm_orientation_walkthrough.md`.
+
 ### UnicodeDecodeError When Running Script
 
 **Problem**: Python throws UnicodeDecodeError with random byte values.
@@ -240,6 +275,7 @@ Files in `src/archive/` and `data/archive/` are previous iterations or experimen
 
 | Date | Change |
 |------|--------|
+| 2025-12-25 | Added MetaHuman-standard FBX export workflow and UE5 retargeting steps |
 | 2025-12-23 | Fixed UnicodeDecodeError bug (EditBone reference after mode switch) |
 | 2025-12-23 | Added diagnostic logging for constraint debugging |
 | 2025-12-23 | Changed armature display to OCTAHEDRAL for better constraint visibility |
@@ -249,6 +285,8 @@ Files in `src/archive/` and `data/archive/` are previous iterations or experimen
 
 ## Future Improvements
 
-1. **FBX Export**: Add option to bake animation and export as FBX for Unreal Engine import
-2. **Batch Processing**: Process multiple videos automatically
-3. **Real-time Preview**: Add video overlay to verify skeleton tracking accuracy
+1. **Root Motion + FPS Handling**: Add a dedicated root bone and explicit timing control (see `../docs/proposed_changes.md`)
+2. **Rotation Use**: Apply SAM3D joint rotations or computed local frames for twist accuracy
+3. **Contact-Aware Smoothing**: Reduce foot sliding and preserve contacts
+4. **Batch Processing**: Process multiple videos automatically
+5. **Real-time Preview**: Add video overlay to verify skeleton tracking accuracy

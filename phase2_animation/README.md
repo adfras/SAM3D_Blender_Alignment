@@ -9,7 +9,7 @@ This phase builds on Phase 1's alignment work to create a complete **video → a
 ## Pipeline
 
 ```
-Video → SAM3D Inference → Motion JSON → (Optional) Smoothing → Blender Script → Animated Skeleton
+Video -> SAM3D Inference -> Motion JSON -> (Optional) Smoothing -> Blender (Preview or Export) -> FBX -> UE5 Retarget
 ```
 
 ## Quick Start
@@ -30,9 +30,18 @@ python src/smooth_motion_data.py
 
 1. Open Blender
 2. Switch to **Scripting** workspace
-3. Open `src/complete_pipeline_metahuman.py`
+3. Open `src/complete_pipeline_metahuman.py` for preview, or `src/metahuman_standard_export.py` for UE5 export
 4. Press **Alt+P** to run
-5. Press **Spacebar** to play animation
+5. Press **Spacebar** to play animation (preview script)
+
+**FBX Output (export script)**: `data/metahuman_standard.fbx`
+
+### Step 4: Unreal Engine 5 Retargeting
+
+1. Import the FBX as a skeletal mesh with animation
+2. Create an IK Rig for the imported skeleton
+3. Create an IK Retargeter (source: imported skeleton, target: MetaHuman)
+4. Retarget the animation to your MetaHuman character
 
 ## Files
 
@@ -41,6 +50,7 @@ python src/smooth_motion_data.py
 | `src/run_sam3d_inference.py` | Extract motion from video |
 | `src/smooth_motion_data.py` | Apply temporal smoothing |
 | `src/complete_pipeline_metahuman.py` | Create animated skeleton in Blender |
+| `src/metahuman_standard_export.py` | Export MetaHuman-standard FBX |
 | `src/extract_mhr_hierarchy.py` | Extract MHR skeleton (run once) |
 | `data/mhr_hierarchy.json` | Skeleton hierarchy (127 joints) |
 
@@ -50,6 +60,7 @@ See [PIPELINE_DOCUMENTATION.md](PIPELINE_DOCUMENTATION.md) for:
 - Coordinate system transformations
 - Joint name mappings (SAM3D → MetaHuman)
 - Constraint setup (COPY_LOCATION + STRETCH_TO)
+- UE5 export settings and axis corrections (see `../docs/fix_arm_orientation_walkthrough.md`)
 - Troubleshooting guide
 
 ## Key Technical Decisions
