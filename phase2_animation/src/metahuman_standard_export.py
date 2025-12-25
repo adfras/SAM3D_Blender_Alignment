@@ -9,6 +9,7 @@ Key differences from complete_pipeline_metahuman.py:
 - Bones have single names matching MetaHuman skeleton
 - Proper parent-child hierarchy (not just stretch constraints)
 - Better compatibility with UE5 IK Retargeter auto-mapping
+- Optional root bone separation and joint-rotation usage
 
 Usage in Blender:
     1. Open script in Scripting tab
@@ -36,11 +37,35 @@ MOTION_PATH_SMOOTH = os.path.join(BASE_PATH, "data", "video_motion_armature_smoo
 MOTION_PATH_RAW = os.path.join(BASE_PATH, "data", "video_motion_armature.json")
 MOTION_PATH = MOTION_PATH_SMOOTH if os.path.exists(MOTION_PATH_SMOOTH) else MOTION_PATH_RAW
 FBX_OUTPUT_PATH = os.path.join(BASE_PATH, "data", "metahuman_standard.fbx")
+FBX_GLOBAL_SCALE = 100.0
+
+# --- Pipeline Options ---
+USE_ROOT_BONE = True
+ROOT_BONE_NAME = "root"
+ROOT_SOURCE_PREFERENCE = "body_world"  # "body_world" or "root"
+ROOT_STATIC_THRESHOLD = 1e-4  # If body_world is static, fall back to using root
+
+USE_JOINT_ROTATIONS = True
+USE_DAMPED_TRACK_FALLBACK = True  # Fallback orientation when rotations missing
+
+REST_POSE_MODE = "frame"  # "frame" or "median"
+REST_POSE_FRAME = 0
+REST_POSE_MAX_SAMPLES = 200
+
+SET_SCENE_FPS = True
+DEFAULT_FPS = 30.0
+
+VALIDATE_AXES_SCALE = True
+
+ADD_TWIST_BONES = False
+ADD_IK_BONES = False
 
 COORD_TRANSFORM = Matrix([[1,0,0], [0,0,1], [0,-1,0]])
+COORD_TRANSFORM_INV = COORD_TRANSFORM.inverted()
 
 # SAM3D joint name to MetaHuman bone name mapping
 SAM3D_TO_MH = {
+    "body_world": "root",
     "root": "pelvis",
     "c_spine0": "spine_01",
     "c_spine1": "spine_02",
@@ -201,9 +226,77 @@ INTERPOLATED_BONES = {
     # Note: pinky_metacarpal is now mapped directly from l_pinky0/r_pinky0
 }
 
+# Optional twist/IK placeholders (disabled/enabled via flags)
+TWIST_BONE_SOURCES = {
+    "upperarm_twist_01_l": ("l_uparm", "l_lowarm"),
+    "upperarm_twist_01_r": ("r_uparm", "r_lowarm"),
+    "lowerarm_twist_01_l": ("l_lowarm", "l_wrist"),
+    "lowerarm_twist_01_r": ("r_lowarm", "r_wrist"),
+    "thigh_twist_01_l": ("l_upleg", "l_lowleg"),
+    "thigh_twist_01_r": ("r_upleg", "r_lowleg"),
+    "calf_twist_01_l": ("l_lowleg", "l_foot"),
+    "calf_twist_01_r": ("r_lowleg", "r_foot"),
+}
+
+IK_BONE_SOURCES = {
+    "ik_hand_root": ("root", "c_spine3", 0.5),
+    "ik_hand_l": ("l_wrist",),
+    "ik_hand_r": ("r_wrist",),
+    "ik_foot_root": ("root", "root", 0.0),
+    "ik_foot_l": ("l_foot",),
+    "ik_foot_r": ("r_foot",),
+}
+
+TWIST_BONE_HIERARCHY = {
+    "upperarm_twist_01_l": ("upperarm_l", "lowerarm_l"),
+    "upperarm_twist_01_r": ("upperarm_r", "lowerarm_r"),
+    "lowerarm_twist_01_l": ("lowerarm_l", "hand_l"),
+    "lowerarm_twist_01_r": ("lowerarm_r", "hand_r"),
+    "thigh_twist_01_l": ("thigh_l", "calf_l"),
+    "thigh_twist_01_r": ("thigh_r", "calf_r"),
+    "calf_twist_01_l": ("calf_l", "foot_l"),
+    "calf_twist_01_r": ("calf_r", "foot_r"),
+}
+
+IK_BONE_HIERARCHY = {
+    "ik_hand_root": ("root", "ik_hand_l"),
+    "ik_hand_l": ("ik_hand_root", None),
+    "ik_hand_r": ("ik_hand_root", None),
+    "ik_foot_root": ("root", "ik_foot_l"),
+    "ik_foot_l": ("ik_foot_root", None),
+    "ik_foot_r": ("ik_foot_root", None),
+}
+
+
+def build_metahuman_hierarchy():
+    """Build hierarchy with optional root/twist/IK bones."""
+    hierarchy = dict(METAHUMAN_HIERARCHY)
+
+    if USE_ROOT_BONE:
+        hierarchy[ROOT_BONE_NAME] = (None, "pelvis")
+        if "pelvis" in hierarchy:
+            parent, child = hierarchy["pelvis"]
+            hierarchy["pelvis"] = (ROOT_BONE_NAME, child)
+    elif ADD_IK_BONES and ROOT_BONE_NAME not in hierarchy:
+        hierarchy[ROOT_BONE_NAME] = (None, "pelvis")
+
+    if ADD_TWIST_BONES:
+        hierarchy.update(TWIST_BONE_HIERARCHY)
+
+    if ADD_IK_BONES:
+        hierarchy.update(IK_BONE_HIERARCHY)
+
+    return hierarchy
+
 
 def transform_point(point):
     return COORD_TRANSFORM @ Vector(point)
+
+
+def transform_rotation(rot_matrix):
+    """Convert SAM3D rotation matrix to Blender space."""
+    m = Matrix(rot_matrix)
+    return COORD_TRANSFORM @ m @ COORD_TRANSFORM_INV
 
 
 def cleanup():
@@ -213,186 +306,446 @@ def cleanup():
         bpy.data.armatures.remove(arm)
 
 
-def create_empties(sam3d_joint_names, rest_positions):
-    """Create empties for all MetaHuman bones (including interpolated ones)."""
+def normalize_joint_names(joint_names):
+    drop_body_world = False
+    if joint_names and joint_names[0] in ['body_world', 'Body_World'] and not USE_ROOT_BONE:
+        joint_names = joint_names[1:]
+        drop_body_world = True
+    return joint_names, drop_body_world
+
+
+def extract_frame_joints(frame_data, drop_body_world):
+    joints = frame_data.get('joints_mhr', frame_data.get('joints3d', []))
+    if drop_body_world and len(joints) == 127:
+        joints = joints[1:]
+    return joints
+
+
+def extract_frame_rotations(frame_data, drop_body_world):
+    rots = frame_data.get('joint_rotations')
+    if rots and drop_body_world and len(rots) == 127:
+        rots = rots[1:]
+    return rots
+
+
+def select_rest_positions(frames_data, drop_body_world):
+    if not frames_data:
+        return []
+
+    if REST_POSE_MODE.lower() == "median":
+        sample_count = min(len(frames_data), REST_POSE_MAX_SAMPLES)
+        step = max(1, len(frames_data) // sample_count)
+        samples = frames_data[::step][:sample_count]
+        sample_joints = [extract_frame_joints(frame, drop_body_world) for frame in samples]
+        if not sample_joints:
+            return []
+        n_joints = len(sample_joints[0])
+        rest = []
+        for j in range(n_joints):
+            coords = [sample[j] for sample in sample_joints]
+            xs = sorted(c[0] for c in coords)
+            ys = sorted(c[1] for c in coords)
+            zs = sorted(c[2] for c in coords)
+            mid = len(xs) // 2
+            if len(xs) % 2 == 1:
+                rest.append([xs[mid], ys[mid], zs[mid]])
+            else:
+                rest.append([
+                    0.5 * (xs[mid - 1] + xs[mid]),
+                    0.5 * (ys[mid - 1] + ys[mid]),
+                    0.5 * (zs[mid - 1] + zs[mid]),
+                ])
+        return rest
+
+    frame_idx = max(0, min(REST_POSE_FRAME, len(frames_data) - 1))
+    return extract_frame_joints(frames_data[frame_idx], drop_body_world)
+
+
+def set_scene_fps(fps):
+    if not fps:
+        return
+    scene = bpy.context.scene
+    scene.render.fps = int(round(fps))
+    scene.render.fps_base = 1.0
+
+
+def choose_root_source(joint_index, frames_data, drop_body_world):
+    if not USE_ROOT_BONE:
+        return None
+
+    body_world_idx = joint_index.get("body_world")
+    root_idx = joint_index.get("root")
+
+    pref = ROOT_SOURCE_PREFERENCE.lower()
+
+    if pref == "root" and root_idx is not None:
+        return "root"
+
+    if body_world_idx is not None:
+        positions = []
+        for frame in frames_data:
+            joints = extract_frame_joints(frame, drop_body_world)
+            if body_world_idx < len(joints):
+                positions.append(Vector(joints[body_world_idx]))
+        if positions:
+            max_dev = max((p - positions[0]).length for p in positions)
+            if max_dev < ROOT_STATIC_THRESHOLD:
+                if pref == "body_world":
+                    return "body_world"
+                if root_idx is not None:
+                    return "root"
+        if pref == "body_world":
+            return "body_world"
+        # Default to body_world if available
+        return "body_world"
+
+    if root_idx is not None:
+        return "root"
+
+    return None
+
+
+def get_root_positions(frames_data, joint_index, root_source_name, drop_body_world):
+    if not root_source_name:
+        return None
+    idx = joint_index.get(root_source_name)
+    if idx is None:
+        return None
+    root_positions = []
+    for frame in frames_data:
+        joints = extract_frame_joints(frame, drop_body_world)
+        if idx < len(joints):
+            root_positions.append(joints[idx])
+    return root_positions
+
+
+def validate_axes_scale(rest_positions, joint_names):
+    if not rest_positions or not joint_names:
+        return
+    # Axis sanity check
+    sam_forward = Vector((0, 0, 1))
+    sam_up = Vector((0, 1, 0))
+    bl_forward = transform_point(sam_forward)
+    bl_up = transform_point(sam_up)
+    print("Axis check (SAM3D -> Blender):")
+    print("  forward:", tuple(round(v, 3) for v in bl_forward))
+    print("  up:", tuple(round(v, 3) for v in bl_up))
+    print("  FBX global_scale:", FBX_GLOBAL_SCALE)
+
+    # Scale sanity check: approximate height
+    ys = [p[1] for p in rest_positions]
+    height = max(ys) - min(ys) if ys else 0.0
+    if height < 0.5 or height > 2.5:
+        print("WARNING: Unusual skeleton height (~{:.2f}m). Check scale settings.".format(height))
+
+
+def create_empties(sam3d_joint_names, rest_positions, hierarchy, root_source_name=None, root_rest_pos=None):
+    """Create empties for all MetaHuman bones (including interpolated/extra ones)."""
     joint_index = {n: i for i, n in enumerate(sam3d_joint_names)}
-    
+
     emp_coll = bpy.data.collections.new("Empties")
     bpy.context.scene.collection.children.link(emp_coll)
-    
+
     empties = {}
-    
+
+    def to_local(pos):
+        if root_rest_pos is None:
+            return pos
+        return [pos[0] - root_rest_pos[0], pos[1] - root_rest_pos[1], pos[2] - root_rest_pos[2]]
+
+    root_empty = None
+    if USE_ROOT_BONE and root_source_name and root_rest_pos is not None:
+        root_empty = bpy.data.objects.new("J_" + ROOT_BONE_NAME, None)
+        root_empty.empty_display_type = 'SPHERE'
+        root_empty.empty_display_size = 0.02
+        root_empty.location = transform_point(root_rest_pos)
+        root_empty.rotation_mode = 'QUATERNION'
+        emp_coll.objects.link(root_empty)
+        empties[ROOT_BONE_NAME] = root_empty
+
+    extra_bones = set()
+    if ADD_TWIST_BONES:
+        extra_bones.update(TWIST_BONE_SOURCES.keys())
+    if ADD_IK_BONES:
+        extra_bones.update(IK_BONE_SOURCES.keys())
+
     # 1. Create empties for mapped bones
-    for mh_name in METAHUMAN_HIERARCHY.keys():
-        if mh_name in INTERPOLATED_BONES:
+    for mh_name in hierarchy.keys():
+        if mh_name == ROOT_BONE_NAME:
             continue
-            
+        if mh_name in INTERPOLATED_BONES or mh_name in extra_bones:
+            continue
+
         sam_name = MH_TO_SAM3D.get(mh_name)
         if not sam_name or sam_name not in joint_index:
             continue
-        
+
         idx = joint_index[sam_name]
         if idx >= len(rest_positions):
             continue
-        
-        pos = transform_point(rest_positions[idx])
+
+        pos = to_local(rest_positions[idx])
         empty = bpy.data.objects.new("J_" + mh_name, None)
         empty.empty_display_type = 'SPHERE'
         empty.empty_display_size = 0.015
-        empty.location = pos
+        if root_empty:
+            empty.parent = root_empty
+        empty.location = transform_point(pos)
+        empty.rotation_mode = 'QUATERNION'
         emp_coll.objects.link(empty)
         empties[mh_name] = empty
-        
+
     # 2. Create empties for interpolated bones
     for mh_name, bone_data in INTERPOLATED_BONES.items():
-        # Handle both (start, end) and (start, end, weight) formats
         if len(bone_data) == 3:
             start_sam, end_sam, weight = bone_data
         else:
             start_sam, end_sam = bone_data
-            weight = 0.5  # Default: midpoint
-        
+            weight = 0.5
+
         if start_sam not in joint_index or end_sam not in joint_index:
             continue
-            
+
         idx1 = joint_index[start_sam]
         idx2 = joint_index[end_sam]
-        
-        p1 = transform_point(rest_positions[idx1])
-        p2 = transform_point(rest_positions[idx2])
+
+        p1 = Vector(rest_positions[idx1])
+        p2 = Vector(rest_positions[idx2])
         pos = p1 * (1.0 - weight) + p2 * weight
-        
+        pos = to_local(pos)
+
         empty = bpy.data.objects.new("J_" + mh_name, None)
         empty.empty_display_type = 'SPHERE'
         empty.empty_display_size = 0.01
-        empty.location = pos
+        if root_empty:
+            empty.parent = root_empty
+        empty.location = transform_point(pos)
+        empty.rotation_mode = 'QUATERNION'
         emp_coll.objects.link(empty)
         empties[mh_name] = empty
-    
+
+    # 3. Optional extra bones (twist/IK)
+    extra_sources = {}
+    if ADD_TWIST_BONES:
+        extra_sources.update(TWIST_BONE_SOURCES)
+    if ADD_IK_BONES:
+        extra_sources.update(IK_BONE_SOURCES)
+
+    for mh_name, src in extra_sources.items():
+        if mh_name in empties:
+            continue
+        pos = None
+        if len(src) == 1:
+            j = src[0]
+            if j in joint_index:
+                pos = rest_positions[joint_index[j]]
+        else:
+            start = src[0]
+            end = src[1]
+            weight = src[2] if len(src) == 3 else 0.5
+            if start in joint_index and end in joint_index:
+                p1 = Vector(rest_positions[joint_index[start]])
+                p2 = Vector(rest_positions[joint_index[end]])
+                pos = p1 * (1.0 - weight) + p2 * weight
+
+        if pos is None:
+            continue
+
+        pos = to_local(pos)
+        empty = bpy.data.objects.new("J_" + mh_name, None)
+        empty.empty_display_type = 'SPHERE'
+        empty.empty_display_size = 0.01
+        if root_empty:
+            empty.parent = root_empty
+        empty.location = transform_point(pos)
+        empty.rotation_mode = 'QUATERNION'
+        emp_coll.objects.link(empty)
+        empties[mh_name] = empty
+
     print("Created " + str(len(empties)) + " empties")
     return empties, joint_index
 
 
-def animate_empties(empties, frames_data, sam3d_joint_names, joint_index):
+def animate_empties(
+    empties,
+    frames_data,
+    sam3d_joint_names,
+    joint_index,
+    hierarchy,
+    root_source_name=None,
+    root_positions=None,
+    drop_body_world=False,
+    has_rotations=False,
+):
     """Animate empties from SAM3D motion data."""
     num_frames = len(frames_data)
     print("Animating " + str(num_frames) + " frames...")
-    
+
+    extra_bones = set()
+    if ADD_TWIST_BONES:
+        extra_bones.update(TWIST_BONE_SOURCES.keys())
+    if ADD_IK_BONES:
+        extra_bones.update(IK_BONE_SOURCES.keys())
+
     for frame_idx, frame_data in enumerate(frames_data):
-        joints = frame_data.get('joints_mhr', frame_data.get('joints3d', []))
-        if len(joints) == 127:
-            joints = joints[1:]
-        
+        frame_number = frame_data.get('frame_idx', frame_idx)
+        joints = extract_frame_joints(frame_data, drop_body_world)
+        rots = extract_frame_rotations(frame_data, drop_body_world) if (has_rotations and USE_JOINT_ROTATIONS) else None
+
+        root_pos = None
+        if root_positions and frame_idx < len(root_positions):
+            root_pos = root_positions[frame_idx]
+
+        # Animate root empty
+        if USE_ROOT_BONE and root_source_name and ROOT_BONE_NAME in empties and root_pos is not None:
+            root_empty = empties[ROOT_BONE_NAME]
+            root_empty.location = transform_point(root_pos)
+            root_empty.keyframe_insert(data_path="location", frame=frame_number)
+            if rots and root_source_name in joint_index:
+                r_idx = joint_index[root_source_name]
+                if r_idx < len(rots):
+                    rot_mat = transform_rotation(rots[r_idx])
+                    root_empty.rotation_quaternion = rot_mat.to_quaternion()
+                    root_empty.keyframe_insert(data_path="rotation_quaternion", frame=frame_number)
+
         # 1. Animate mapped bones
         for mh_name, empty in empties.items():
-            if mh_name in INTERPOLATED_BONES:
+            if mh_name == ROOT_BONE_NAME:
                 continue
-                
+            if mh_name in INTERPOLATED_BONES or mh_name in extra_bones:
+                continue
+
             sam_name = MH_TO_SAM3D.get(mh_name)
             if not sam_name or sam_name not in joint_index:
                 continue
-            
+
             idx = joint_index[sam_name]
             if idx >= len(joints):
                 continue
-            
-            pos = transform_point(joints[idx])
-            empty.location = pos
-            empty.keyframe_insert(data_path="location", frame=frame_idx)
-            
+
+            pos = joints[idx]
+            if root_pos is not None:
+                pos = [pos[0] - root_pos[0], pos[1] - root_pos[1], pos[2] - root_pos[2]]
+            empty.location = transform_point(pos)
+            empty.keyframe_insert(data_path="location", frame=frame_number)
+
+            if rots and idx < len(rots):
+                rot_mat = transform_rotation(rots[idx])
+                empty.rotation_quaternion = rot_mat.to_quaternion()
+                empty.keyframe_insert(data_path="rotation_quaternion", frame=frame_number)
+
         # 2. Animate interpolated bones
         for mh_name, bone_data in INTERPOLATED_BONES.items():
             if mh_name not in empties:
                 continue
-            
-            # Handle both (start, end) and (start, end, weight) formats
+
             if len(bone_data) == 3:
                 start_sam, end_sam, weight = bone_data
             else:
                 start_sam, end_sam = bone_data
-                weight = 0.5  # Default: midpoint
-            
-            idx1 = joint_index[start_sam]
-            idx2 = joint_index[end_sam]
-            
-            p1 = transform_point(joints[idx1])
-            p2 = transform_point(joints[idx2])
+                weight = 0.5
+
+            idx1 = joint_index.get(start_sam)
+            idx2 = joint_index.get(end_sam)
+            if idx1 is None or idx2 is None:
+                continue
+            if idx1 >= len(joints) or idx2 >= len(joints):
+                continue
+
+            p1 = Vector(joints[idx1])
+            p2 = Vector(joints[idx2])
             pos = p1 * (1.0 - weight) + p2 * weight
-            
-            empties[mh_name].location = pos
-            empties[mh_name].keyframe_insert(data_path="location", frame=frame_idx)
-        
+            if root_pos is not None:
+                pos = Vector((pos[0] - root_pos[0], pos[1] - root_pos[1], pos[2] - root_pos[2]))
+
+            empties[mh_name].location = transform_point(pos)
+            empties[mh_name].keyframe_insert(data_path="location", frame=frame_number)
+
+        # 3. Animate extra bones (twist/IK)
+        extra_sources = {}
+        if ADD_TWIST_BONES:
+            extra_sources.update(TWIST_BONE_SOURCES)
+        if ADD_IK_BONES:
+            extra_sources.update(IK_BONE_SOURCES)
+
+        for mh_name, src in extra_sources.items():
+            if mh_name not in empties:
+                continue
+            pos = None
+            if len(src) == 1:
+                j = src[0]
+                if j in joint_index and joint_index[j] < len(joints):
+                    pos = joints[joint_index[j]]
+            else:
+                start = src[0]
+                end = src[1]
+                weight = src[2] if len(src) == 3 else 0.5
+                if start in joint_index and end in joint_index:
+                    p1 = Vector(joints[joint_index[start]])
+                    p2 = Vector(joints[joint_index[end]])
+                    pos = p1 * (1.0 - weight) + p2 * weight
+            if pos is None:
+                continue
+
+            if root_pos is not None:
+                pos = [pos[0] - root_pos[0], pos[1] - root_pos[1], pos[2] - root_pos[2]]
+
+            empties[mh_name].location = transform_point(pos)
+            empties[mh_name].keyframe_insert(data_path="location", frame=frame_number)
+
         if frame_idx % 200 == 0:
             print("  Frame " + str(frame_idx) + "/" + str(num_frames))
-    
+
     return num_frames
 
 
-def create_armature(empties, sam3d_joint_names, rest_positions, name="MetaHuman_Skeleton"):
+def create_armature(empties, hierarchy, name="MetaHuman_Skeleton", has_rotations=False):
     """
     Create armature with MetaHuman-standard bone names and proper hierarchy.
-    
+
     Each bone:
     - Is named like 'pelvis', 'spine_01', etc. (matching MetaHuman)
     - Has proper parent set
     - Has head at its joint position
     - Has tail pointing toward its child (or offset if no child)
     """
-    joint_index = {n: i for i, n in enumerate(sam3d_joint_names)}
-    
     arm_data = bpy.data.armatures.new(name + "_Armature")
     arm_obj = bpy.data.objects.new(name, arm_data)
     bpy.context.collection.objects.link(arm_obj)
-    
+
     bpy.context.view_layer.objects.active = arm_obj
     bpy.ops.object.mode_set(mode='EDIT')
-    
+
     edit_bones = arm_data.edit_bones
     created_bones = {}
-    
+
     # First pass: create all bones with head positions
-    for mh_name, (parent_name, child_name) in METAHUMAN_HIERARCHY.items():
-        # Create bone if we have an empty for it (mapped or interpolated)
+    for mh_name, (parent_name, child_name) in hierarchy.items():
         if mh_name not in empties:
             continue
-        
+
         bone = edit_bones.new(mh_name)
-        
-        # Use empty location for head
-        # We need to get location from the empty object, but in Edit mode
-        # we can't access object location easily if it's animated? 
-        # Actually empties are at rest pose on frame 0, and we haven't changed frame yet.
-        # But wait, create_empties created them at rest pose. 
-        # animate_empties moved them? No, it keyed them.
-        # Let's ensure we are at frame 0.
-        
         empty = empties[mh_name]
-        head_pos = empty.location # This is current location (frame 0 if not played)
+        head_pos = empty.location
         bone.head = head_pos
-        
-        # Temporary tail - will be set properly in second pass
         bone.tail = head_pos + Vector((0, 0.05, 0))
-        
         created_bones[mh_name] = bone
-    
+
     # Second pass: set tails and parents
-    for mh_name, (parent_name, child_name) in METAHUMAN_HIERARCHY.items():
+    for mh_name, (parent_name, child_name) in hierarchy.items():
         if mh_name not in created_bones:
             continue
-        
+
         bone = created_bones[mh_name]
-        
-        # Set parent
+
         if parent_name and parent_name in created_bones:
             bone.parent = created_bones[parent_name]
-            bone.use_connect = False  # Don't force head to parent's tail
-        
-        # Set tail toward child if available
+            bone.use_connect = False
+
         if child_name and child_name in created_bones:
             child_bone = created_bones[child_name]
             bone.tail = child_bone.head.copy()
         else:
-            # No child - create a short offset tail based on bone direction
             if bone.parent:
                 direction = bone.head - bone.parent.head
                 if direction.length > 0.001:
@@ -402,53 +755,63 @@ def create_armature(empties, sam3d_joint_names, rest_positions, name="MetaHuman_
                     bone.tail = bone.head + Vector((0, 0.03, 0))
             else:
                 bone.tail = bone.head + Vector((0, 0.05, 0))
-        
-        # Ensure minimum bone length
+
         if (bone.tail - bone.head).length < 0.001:
             bone.tail = bone.head + Vector((0, 0.02, 0))
-    
+
+        if ADD_IK_BONES and mh_name in IK_BONE_HIERARCHY:
+            bone.use_deform = False
+
     bpy.ops.object.mode_set(mode='OBJECT')
-    
+
     # Add constraints to make bones follow empties
     bpy.context.view_layer.objects.active = arm_obj
     bpy.ops.object.mode_set(mode='POSE')
-    
+
     constrained_count = 0
-    
+
     for mh_name in created_bones.keys():
         if mh_name not in empties:
             continue
-        
+
         pose_bone = arm_obj.pose.bones.get(mh_name)
         if not pose_bone:
             continue
-        
-        # COPY_LOCATION constraint to follow the empty
+
+        pose_bone.lock_scale = (True, True, True)
+
+        # COPY_LOCATION to follow empty (no scaling)
         cl = pose_bone.constraints.new('COPY_LOCATION')
         cl.target = empties[mh_name]
         cl.influence = 1.0
-        
-        # Get child name for STRETCH_TO
-        _, child_name = METAHUMAN_HIERARCHY.get(mh_name, (None, None))
-        
-        if child_name and child_name in empties:
-            st = pose_bone.constraints.new('STRETCH_TO')
-            st.target = empties[child_name]
-            st.rest_length = pose_bone.bone.length
-            st.volume = 'NO_VOLUME'
-            st.influence = 1.0
-        
+
+        # Orientation: use joint rotations if available, otherwise track child
+        if USE_JOINT_ROTATIONS and has_rotations and mh_name in MH_TO_SAM3D:
+            cr = pose_bone.constraints.new('COPY_ROTATION')
+            cr.target = empties[mh_name]
+            cr.mix_mode = 'REPLACE'
+            cr.target_space = 'WORLD'
+            cr.owner_space = 'WORLD'
+            cr.influence = 1.0
+        elif USE_DAMPED_TRACK_FALLBACK:
+            _, child_name = hierarchy.get(mh_name, (None, None))
+            if child_name and child_name in empties:
+                dt = pose_bone.constraints.new('DAMPED_TRACK')
+                dt.target = empties[child_name]
+                dt.track_axis = 'TRACK_Y'
+                dt.influence = 1.0
+
         constrained_count += 1
-    
+
     bpy.ops.object.mode_set(mode='OBJECT')
     bpy.context.view_layer.update()
-    
+
     arm_obj.data.display_type = 'OCTAHEDRAL'
     arm_obj.show_in_front = True
-    
+
     print("Created armature with " + str(len(created_bones)) + " bones")
     print("Constrained " + str(constrained_count) + " bones to empties")
-    
+
     return arm_obj
 
 
@@ -479,8 +842,11 @@ def bake_animation(arm_obj, num_frames):
 def add_root_mesh(arm_obj):
     """Add a simple mesh with vertex weights for UE5 import compatibility."""
     # Create a simple cube mesh at the pelvis location
+    root_bone = arm_obj.data.bones.get(ROOT_BONE_NAME) if USE_ROOT_BONE else None
     pelvis_bone = arm_obj.data.bones.get('pelvis')
-    if pelvis_bone:
+    if root_bone:
+        location = arm_obj.matrix_world @ root_bone.head_local
+    elif pelvis_bone:
         location = arm_obj.matrix_world @ pelvis_bone.head_local
     else:
         location = (0, 0, 1)  # Default pelvis height
@@ -496,8 +862,9 @@ def add_root_mesh(arm_obj):
     mesh_obj.parent = arm_obj
     mesh_obj.parent_type = 'OBJECT'
     
-    # Create vertex group for pelvis bone and assign all vertices
-    vg = mesh_obj.vertex_groups.new(name='pelvis')
+    # Create vertex group for root/pelvis bone and assign all vertices
+    vg_name = ROOT_BONE_NAME if root_bone else 'pelvis'
+    vg = mesh_obj.vertex_groups.new(name=vg_name)
     vertices = [v.index for v in mesh_obj.data.vertices]
     vg.add(vertices, 1.0, 'REPLACE')  # Full weight
     
@@ -526,8 +893,8 @@ def export_fbx(arm_obj, output_path):
         filepath=output_path,
         use_selection=True,
         object_types={'ARMATURE', 'MESH'},
-        # Scale and axes for UE5
-        global_scale=100.0,  # Blender meters to UE5 centimeters
+    # Scale and axes for UE5
+    global_scale=FBX_GLOBAL_SCALE,  # Blender meters to UE5 centimeters
         apply_scale_options='FBX_SCALE_ALL',
         axis_forward='-Y',  # Standard UE5 forward axis
         axis_up='Z',
@@ -572,35 +939,68 @@ def main():
     
     sam3d_joint_names = hierarchy['joints']
     frames_data = motion.get('frames', [motion])
-    
-    # Skip body_world if present
-    if len(sam3d_joint_names) == 127 and sam3d_joint_names[0] in ['body_world', 'Body_World']:
-        sam3d_joint_names = sam3d_joint_names[1:]
-    
-    rest_joints = frames_data[0].get('joints_mhr', frames_data[0].get('joints3d', []))
-    if len(rest_joints) == 127:
-        rest_joints = rest_joints[1:]
-    
+
+    sam3d_joint_names, drop_body_world = normalize_joint_names(sam3d_joint_names)
+    has_rotations = bool(frames_data and frames_data[0].get('joint_rotations'))
+
+    rest_joints = select_rest_positions(frames_data, drop_body_world)
+
     print("SAM3D Joints: " + str(len(sam3d_joint_names)))
     print("Frames: " + str(len(frames_data)))
-    
+
+    # Set FPS from motion metadata if available
+    if SET_SCENE_FPS:
+        set_scene_fps(motion.get("fps", DEFAULT_FPS))
+
+    # Build hierarchy with optional bones
+    mh_hierarchy = build_metahuman_hierarchy()
+
+    # Root handling
+    joint_index = {n: i for i, n in enumerate(sam3d_joint_names)}
+    root_source_name = choose_root_source(joint_index, frames_data, drop_body_world)
+    root_positions = get_root_positions(frames_data, joint_index, root_source_name, drop_body_world)
+    root_rest_pos = None
+    if root_source_name and root_source_name in joint_index and rest_joints:
+        root_rest_pos = rest_joints[joint_index[root_source_name]]
+
+    if root_source_name:
+        print("Root source: " + root_source_name)
+
+    if VALIDATE_AXES_SCALE:
+        validate_axes_scale(rest_joints, sam3d_joint_names)
+
     print("")
     print("[1/4] Creating empties...")
-    empties, joint_index = create_empties(sam3d_joint_names, rest_joints)
-    
+    empties, joint_index = create_empties(
+        sam3d_joint_names,
+        rest_joints,
+        mh_hierarchy,
+        root_source_name=root_source_name,
+        root_rest_pos=root_rest_pos,
+    )
+
     print("")
     print("[2/4] Animating empties...")
-    num_frames = animate_empties(empties, frames_data, sam3d_joint_names, joint_index)
-    
+    num_frames = animate_empties(
+        empties,
+        frames_data,
+        sam3d_joint_names,
+        joint_index,
+        mh_hierarchy,
+        root_source_name=root_source_name,
+        root_positions=root_positions,
+        drop_body_world=drop_body_world,
+        has_rotations=has_rotations,
+    )
+
     print("")
     print("[3/4] Creating MetaHuman-standard armature...")
-    # Ensure we are at frame 0 (rest pose) so empties are in correct position for bone creation
     bpy.context.scene.frame_set(0)
-    arm_obj = create_armature(empties, sam3d_joint_names, rest_joints)
-    
+    arm_obj = create_armature(empties, mh_hierarchy, has_rotations=has_rotations)
+
+    max_frame = max(frame.get('frame_idx', idx) for idx, frame in enumerate(frames_data)) if frames_data else 0
     bpy.context.scene.frame_start = 0
-    bpy.context.scene.frame_end = num_frames - 1
-    # Frame 0 is setting again, which is fine
+    bpy.context.scene.frame_end = max_frame
     bpy.context.scene.frame_set(0)
     
     # Verify skeleton before baking
@@ -634,7 +1034,10 @@ def main():
     print("FBX exported: " + FBX_OUTPUT_PATH)
     print("")
     print("Bone names now match MetaHuman skeleton:")
-    print("  pelvis, spine_01, spine_02, spine_03, spine_05")
+    if USE_ROOT_BONE:
+        print("  root, pelvis, spine_01, spine_02, spine_03, spine_05")
+    else:
+        print("  pelvis, spine_01, spine_02, spine_03, spine_05")
     print("  clavicle_l, upperarm_l, lowerarm_l, hand_l")
     print("  thigh_l, calf_l, foot_l, ball_l")
     print("  (and corresponding _r for right side)")

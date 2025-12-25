@@ -89,6 +89,7 @@ python src/smooth_motion_data.py
 The script applies a Gaussian filter to smooth joint positions over time.
 
 > **Decision**: Smoothing is optional but recommended for most videos. The script automatically uses the smoothed version if it exists.
+> **New**: Contact-aware foot locking is available via `--contact-aware` to reduce foot sliding.
 
 ### Step 4: Create Animated Skeleton in Blender (Preview)
 
@@ -104,10 +105,10 @@ Open Blender and run the preview script:
 1. Creates animated empties for each joint
 2. Keyframes empty positions for all frames
 3. Creates an armature with bones connecting joints
-4. Applies COPY_LOCATION and STRETCH_TO constraints to bones
+4. Applies COPY_LOCATION and DAMPED_TRACK / COPY_ROTATION constraints to bones
 5. (Optional) Bakes and exports a quick FBX
 
-> **Decision**: We use live constraints (COPY_LOCATION + STRETCH_TO) rather than baking rotation keyframes because:
+> **Decision**: We use live constraints (COPY_LOCATION + DAMPED_TRACK/COPY_ROTATION) rather than baking rotation keyframes because:
 > - Constraints provide real-time feedback during scrubbing
 > - Bones automatically stretch to follow joint positions
 > - Avoids complex rotation calculations that can introduce artifacts
@@ -155,6 +156,18 @@ This matrix:
 
 > **Reason**: SAM3D uses Y-up with Z-forward, while Blender uses Z-up with Y-forward. The export script preserves forward direction for UE5 (see `../docs/fix_arm_orientation_walkthrough.md`).
 
+### 1b. Root Bone Separation
+
+The export script can add a dedicated `root` bone (driven by `body_world` when available). This enables cleaner root motion workflows in UE5 while keeping pelvis motion consistent.
+
+### 1c. Timing / FPS
+
+If the motion JSON includes `fps` and `frame_idx`, Blender's scene FPS and keyframe timing are set to preserve the original timing even with skipped frames.
+
+### 1d. Rest Pose Selection
+
+The export and preview scripts can use a specific frame or a median pose as the rest pose (`REST_POSE_MODE`, `REST_POSE_FRAME`) to avoid offset base poses.
+
 ### 2. Joint Name Mapping
 
 SAM3D uses internal joint names (e.g., `l_wrist`), while MetaHuman uses different conventions (e.g., `hand_l`):
@@ -168,6 +181,14 @@ SAM3D_TO_MH = {
 ```
 
 > **Reason**: MetaHuman naming convention is required for UE5 retargeting. The export script also interpolates missing metacarpals (index/middle/ring) and adds spine_04 and neck_02 to match the MetaHuman hierarchy.
+
+### 2b. Joint Rotations
+
+When `joint_rotations` are present in the SAM3D output, the export script applies them to bones (fallback to DAMPED_TRACK when missing). This improves twist fidelity in arms, hands, and spine.
+
+### 2c. Optional Twist/IK Placeholders
+
+The export script supports optional twist and IK placeholder bones (disabled by default) for better compatibility with some MetaHuman rigs.
 
 ### 3. Bone Definition Using Parent-Child Pairs
 
@@ -275,7 +296,7 @@ Files in `src/archive/` and `data/archive/` are previous iterations or experimen
 
 | Date | Change |
 |------|--------|
-| 2025-12-25 | Added MetaHuman-standard FBX export workflow and UE5 retargeting steps |
+| 2025-12-25 | Added root bone support, joint-rotation usage, FPS-aware timing, and contact-aware smoothing |
 | 2025-12-23 | Fixed UnicodeDecodeError bug (EditBone reference after mode switch) |
 | 2025-12-23 | Added diagnostic logging for constraint debugging |
 | 2025-12-23 | Changed armature display to OCTAHEDRAL for better constraint visibility |
@@ -285,8 +306,6 @@ Files in `src/archive/` and `data/archive/` are previous iterations or experimen
 
 ## Future Improvements
 
-1. **Root Motion + FPS Handling**: Add a dedicated root bone and explicit timing control (see `../docs/proposed_changes.md`)
-2. **Rotation Use**: Apply SAM3D joint rotations or computed local frames for twist accuracy
-3. **Contact-Aware Smoothing**: Reduce foot sliding and preserve contacts
-4. **Batch Processing**: Process multiple videos automatically
-5. **Real-time Preview**: Add video overlay to verify skeleton tracking accuracy
+1. **Batch Processing**: Process multiple videos automatically
+2. **Real-time Preview**: Add video overlay to verify skeleton tracking accuracy
+3. **Retarget QA Tools**: Automated checks for scale, pose, and joint coverage

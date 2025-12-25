@@ -26,6 +26,11 @@ python src/run_sam3d_inference.py --image video.mp4 --output data/video_motion_a
 python src/smooth_motion_data.py
 ```
 
+Optional flags:
+- `--contact-aware` to reduce foot sliding
+- `--normalize-lengths` to enforce fixed bone lengths
+- `--fps` to override FPS (defaults to value stored in the input JSON)
+
 ### Step 3: Create Animated Skeleton in Blender
 
 1. Open Blender
@@ -35,6 +40,13 @@ python src/smooth_motion_data.py
 5. Press **Spacebar** to play animation (preview script)
 
 **FBX Output (export script)**: `data/metahuman_standard.fbx`
+
+Export features:
+- Optional root bone for root motion workflows
+- Joint-rotation usage (if present in SAM3D output)
+- Axis/scale validation before export
+- Optional twist/IK placeholders (toggle in `metahuman_standard_export.py`)
+- Rest pose selection (frame or median) via script constants
 
 ### Step 4: Unreal Engine 5 Retargeting
 
@@ -59,12 +71,12 @@ python src/smooth_motion_data.py
 See [PIPELINE_DOCUMENTATION.md](PIPELINE_DOCUMENTATION.md) for:
 - Coordinate system transformations
 - Joint name mappings (SAM3D → MetaHuman)
-- Constraint setup (COPY_LOCATION + STRETCH_TO)
+- Constraint setup (COPY_LOCATION + DAMPED_TRACK/COPY_ROTATION)
 - UE5 export settings and axis corrections (see `../docs/fix_arm_orientation_walkthrough.md`)
 - Troubleshooting guide
 
 ## Key Technical Decisions
 
-1. **Live Constraints**: Using COPY_LOCATION + STRETCH_TO instead of baked rotations for real-time feedback
+1. **Live Constraints**: Using COPY_LOCATION + DAMPED_TRACK/COPY_ROTATION instead of baked rotations for real-time feedback
 2. **Position-based Animation**: Animating joint positions directly rather than computing complex rotation transforms
 3. **MetaHuman Naming**: Using MetaHuman bone naming convention for eventual UE5 retargeting compatibility

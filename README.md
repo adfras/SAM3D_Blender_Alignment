@@ -27,7 +27,7 @@ This project evolved through two phases:
 
 **Goal**: Create fully animated skeletons in Blender from video input.
 
-**Approach**: Extract 127-joint MHR positions from SAM3D, animate empties at each joint, and use live constraints (COPY_LOCATION + STRETCH_TO) to drive an armature.
+**Approach**: Extract 127-joint MHR positions from SAM3D, animate empties at each joint, and use live constraints (COPY_LOCATION + DAMPED_TRACK/COPY_ROTATION) to drive an armature.
 
 **Key Achievements**:
 - Real-time constraint-driven animation

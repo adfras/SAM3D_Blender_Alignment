@@ -24,6 +24,10 @@ Output JSON structure:
             },
             ...
         ]
+        "fps": 30.0,
+        "frame_stride": 1,
+        "source_total_frames": 900,
+        "source_path": "video.mp4"
     }
 
 Prerequisites:
@@ -212,7 +216,13 @@ def process_video(estimator, video_path, save_mesh=False, skip_frames=1):
     total_time = time.time() - start_time
     print(f"\nCompleted in {total_time:.1f}s ({processed_count / total_time:.1f} fps)")
 
-    return {"frames": frames_data}
+    return {
+        "frames": frames_data,
+        "fps": float(fps) if fps else None,
+        "frame_stride": int(skip_frames),
+        "source_total_frames": int(total_frames),
+        "source_path": video_path,
+    }
 
 
 def process_image(estimator, image_path, save_mesh=False):
@@ -225,7 +235,13 @@ def process_image(estimator, image_path, save_mesh=False):
         return None
 
     out_data = outputs[0]
-    return {k: to_list(v) for k, v in out_data.items()}
+    return {
+        **{k: to_list(v) for k, v in out_data.items()},
+        "fps": None,
+        "frame_stride": 1,
+        "source_total_frames": 1,
+        "source_path": image_path,
+    }
 
 
 def main():

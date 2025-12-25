@@ -14,6 +14,9 @@ Rotation Handling:
     - Converts 3x3 matrices to quaternions
     - Ensures quaternion continuity (sign flips)
     - Applies weighted SLERP chain for smoothing
+Contact Handling (optional):
+    - Detects foot contacts by height + velocity
+    - Locks foot positions during contact to reduce sliding
 
 Usage:
     python src/smooth_motion_data.py --input data/video_motion_armature.json --output data/video_motion_armature_smooth.json
@@ -25,6 +28,11 @@ Arguments:
     --cutoff        Cutoff frequency in Hz for butterworth (default: 3.0)
     --window        Window size for moving_avg (default: 5)
     --normalize-lengths  Enforce bone lengths from first frame
+    --contact-aware Enable foot contact locking
+    --contact-height Height threshold for contact (Y-up, meters)
+    --contact-speed Speed threshold for contact (m/s)
+    --contact-min-frames Minimum consecutive frames to lock
+    --contact-blend Blend factor for contact lock (0-1)
 """
 
 import argparse
@@ -32,6 +40,9 @@ import json
 import os
 import numpy as np
 from typing import List, Dict, Any, Optional
+
+# Joint names used for contact-aware smoothing (MHR names)
+FOOT_JOINT_NAMES = ("l_foot", "r_foot", "l_ball", "r_ball")
 
 # Optional scipy import for Butterworth filter
 try:
@@ -365,6 +376,70 @@ def normalize_bone_lengths(frames_data: List[Dict], hierarchy: Optional[Dict] = 
     return frames_data
 
 
+def apply_contact_aware_smoothing(
+    frames_data: List[Dict],
+    joint_names: List[str],
+    fps: float,
+    height_thresh: float,
+    speed_thresh: float,
+    min_frames: int,
+    blend: float,
+) -> List[Dict]:
+    """Lock feet during contact to reduce sliding (Y-up coordinate system)."""
+    if len(frames_data) < 2:
+        return frames_data
+
+    if not joint_names:
+        print("Contact-aware smoothing skipped: no joint names available.")
+        return frames_data
+
+    # Identify foot joint indices
+    joint_index = {name: i for i, name in enumerate(joint_names)}
+    foot_indices = [joint_index.get(name) for name in FOOT_JOINT_NAMES]
+    foot_indices = [idx for idx in foot_indices if idx is not None]
+
+    if not foot_indices:
+        print("Contact-aware smoothing skipped: foot joints not found in hierarchy.")
+        return frames_data
+
+    key = 'joints_mhr' if 'joints_mhr' in frames_data[0] else 'joints3d'
+    positions = np.array([frame[key] for frame in frames_data], dtype=np.float32)
+    n_frames = positions.shape[0]
+
+    # Compute per-frame velocities
+    velocities = np.zeros_like(positions)
+    velocities[1:] = (positions[1:] - positions[:-1]) * fps
+
+    for idx in foot_indices:
+        foot_pos = positions[:, idx, :]
+        foot_vel = velocities[:, idx, :]
+
+        # Contact heuristic: low height and low speed
+        contact = (foot_pos[:, 1] <= height_thresh) & (np.linalg.norm(foot_vel, axis=1) <= speed_thresh)
+
+        # Find contiguous contact segments
+        start = None
+        for i in range(n_frames + 1):
+            in_contact = contact[i] if i < n_frames else False
+            if in_contact and start is None:
+                start = i
+            if not in_contact and start is not None:
+                end = i
+                if end - start >= min_frames:
+                    anchor = np.mean(foot_pos[start:end], axis=0)
+                    for f in range(start, end):
+                        foot_pos[f] = foot_pos[f] * (1.0 - blend) + anchor * blend
+                start = None
+
+        positions[:, idx, :] = foot_pos
+
+    # Write back
+    for i, frame in enumerate(frames_data):
+        frame[key] = positions[i].tolist()
+
+    return frames_data
+
+
 def main():
     parser = argparse.ArgumentParser(description="Smooth SAM3D motion data")
     parser.add_argument("--input", default="data/video_motion_armature.json",
@@ -377,12 +452,22 @@ def main():
                         help="Cutoff frequency (Hz) for butterworth filter")
     parser.add_argument("--window", type=int, default=5,
                         help="Window size for moving average")
-    parser.add_argument("--fps", type=float, default=30.0,
-                        help="Video frame rate")
+    parser.add_argument("--fps", type=float, default=None,
+                        help="Video frame rate (defaults to value stored in input JSON)")
     parser.add_argument("--normalize-lengths", action="store_true",
                         help="Enforce bone lengths from first frame")
-    parser.add_argument("--hierarchy", default=None,
-                        help="Hierarchy JSON file (for bone normalization)")
+    parser.add_argument("--hierarchy", default="data/mhr_hierarchy.json",
+                        help="Hierarchy JSON file (for bone normalization and contact-aware smoothing)")
+    parser.add_argument("--contact-aware", action="store_true",
+                        help="Enable contact-aware foot locking to reduce sliding")
+    parser.add_argument("--contact-height", type=float, default=0.08,
+                        help="Contact height threshold in meters (Y-up)")
+    parser.add_argument("--contact-speed", type=float, default=0.02,
+                        help="Contact speed threshold in m/s")
+    parser.add_argument("--contact-min-frames", type=int, default=4,
+                        help="Minimum consecutive contact frames to lock")
+    parser.add_argument("--contact-blend", type=float, default=0.9,
+                        help="Blend factor for contact lock (0-1)")
     args = parser.parse_args()
     
     # Resolve paths
@@ -418,6 +503,14 @@ def main():
     
     frames_data = data.get('frames', [data])
     print(f"Loaded {len(frames_data)} frames")
+
+    # Resolve FPS (prefer data, then CLI, then fallback)
+    fps = args.fps
+    if fps is None:
+        fps = data.get("fps", None)
+    if fps is None:
+        fps = 30.0
+    print(f"FPS: {fps}")
     
     # Load hierarchy if specified
     hierarchy = None
@@ -430,20 +523,40 @@ def main():
                 hierarchy = json.load(f)
     
     # Apply smoothing
-    print("\n[1/3] Smoothing positions...")
-    frames_data = smooth_positions(frames_data, args.filter, args.cutoff, args.window, args.fps)
+    print("\n[1/4] Smoothing positions...")
+    frames_data = smooth_positions(frames_data, args.filter, args.cutoff, args.window, fps)
     
-    print("\n[2/3] Smoothing rotations...")
+    print("\n[2/4] Smoothing rotations...")
     frames_data = smooth_rotations(frames_data, args.window)
-    
+
     if args.normalize_lengths:
-        print("\n[3/3] Normalizing bone lengths...")
+        print("\n[3/4] Normalizing bone lengths...")
         frames_data = normalize_bone_lengths(frames_data, hierarchy)
     else:
-        print("\n[3/3] Skipping bone length normalization (use --normalize-lengths to enable)")
+        print("\n[3/4] Skipping bone length normalization (use --normalize-lengths to enable)")
+
+    if args.contact_aware:
+        joint_names = []
+        if hierarchy and 'joints' in hierarchy:
+            joint_names = hierarchy['joints']
+        elif 'joints' in data:
+            joint_names = data['joints']
+        print("\n[4/4] Applying contact-aware foot locking...")
+        frames_data = apply_contact_aware_smoothing(
+            frames_data,
+            joint_names,
+            fps,
+            args.contact_height,
+            args.contact_speed,
+            args.contact_min_frames,
+            args.contact_blend,
+        )
+    else:
+        print("\n[4/4] Skipping contact-aware foot locking (use --contact-aware to enable)")
     
     # Save output
     data['frames'] = frames_data
+    data['fps'] = fps
     
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, 'w') as f:
